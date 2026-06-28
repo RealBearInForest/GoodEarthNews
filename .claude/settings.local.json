@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(sed 's/=.*/=<redacted>/' backend/.env)",
+      "Bash(command -v sqlite3)",
+      "Bash(sqlite3 data/articles.db \"SELECT count\\(*\\) AS total FROM articles; SELECT source, count\\(*\\) FROM articles GROUP BY source ORDER BY 2 DESC LIMIT 10;\")",
+      "Skill(claude-api)",
+      "Skill(claude-api:*)",
+      "Bash(rm -f frontend/src/pages/OceanPage.jsx)",
+      "Bash(rm -rf frontend/public/sprites)",
+      "Bash(node -e ' *)",
+      "Bash(node --check src/newsAggregator.js)",
+      "Bash(exit 1)",
+      "Bash(cat)",
+      "Bash(/usr/bin/python3 /tmp/poly.py)",
+      "Bash(rm -f /tmp/poly.py)"
+    ]
+  }
+}

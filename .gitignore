@@ -1,0 +1,23 @@
+# dependencies
+node_modules/
+**/node_modules/
+
+# secrets / local env
+.env
+**/.env
+!**/.env.example
+
+# local database (rebuilt on the server's persistent disk)
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# build output
+dist/
+frontend/dist/
+
+# misc
+.DS_Store
+*.log
+.vite/
