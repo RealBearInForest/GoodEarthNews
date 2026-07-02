@@ -3,6 +3,7 @@ import { useFrame } from '@react-three/fiber';
 import { Html } from '@react-three/drei';
 import * as THREE from 'three';
 import { latLngToVec3, GLOBE_RADIUS } from '../../utils/globeUtils.js';
+import { timeAgo, isNew } from '../../utils/dates.js';
 
 export const CATEGORY_COLORS = {
   animals:      '#7EE8A2',
@@ -40,6 +41,7 @@ export default function NewsMarker({ cluster, shipDirRef, onOpen, hasOpenCard })
   const glow1Ref   = useRef();
   const glow2Ref   = useRef();
   const dwellStart = useRef(null);
+  const facingRef  = useRef(0);   // read by the tap handler (front hemisphere only)
 
   const dwellBarRef   = useRef(null);
   const dwellLabelRef = useRef(null);
@@ -56,6 +58,7 @@ export default function NewsMarker({ cluster, shipDirRef, onOpen, hasOpenCard })
 
     const shipDir = shipDirRef.current;
     const facing  = markerDir.dot(shipDir);     // 1 = ship directly above, <0 = far side
+    facingRef.current = facing;
 
     const show = markerDir.angleTo(shipDir) < SHOW_ANGLE;
     // Only push state when it actually changes — avoids a re-render every frame.
@@ -99,6 +102,21 @@ export default function NewsMarker({ cluster, shipDirRef, onOpen, hasOpenCard })
 
   return (
     <group position={localPos}>
+      {/* Invisible, generous hit target — tap/click any marker on the facing
+          hemisphere to open it directly (no need to fly onto it first).
+          e.delta filters out drags so flying never accidentally opens cards. */}
+      <mesh
+        onClick={(e) => {
+          if (e.delta < 8 && facingRef.current > 0.1 && !hasOpenCard) {
+            e.stopPropagation();
+            onOpen(cluster);
+          }
+        }}
+      >
+        <sphereGeometry args={[0.1, 8, 8]} />
+        <meshBasicMaterial transparent opacity={0} depthWrite={false} />
+      </mesh>
+
       {/* Dot */}
       <mesh ref={dotRef}>
         <sphereGeometry args={[0.020, 8, 8]} />
@@ -151,6 +169,10 @@ export default function NewsMarker({ cluster, shipDirRef, onOpen, hasOpenCard })
             )}
             <div className="news-card-source">
               {CATEGORY_ICONS[primary.category] || '🌍'} {primary.source}
+              {primary.published_at && (
+                <span className="news-card-date"> · {timeAgo(primary.published_at)}</span>
+              )}
+              {isNew(primary.published_at) && <span className="news-new-badge">NEW</span>}
             </div>
             <div className="news-card-title">
               {primary.title.length > 75

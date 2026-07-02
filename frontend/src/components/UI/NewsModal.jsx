@@ -11,8 +11,27 @@ export default function NewsModal({ articles, onClose }) {
   const [index, setIndex] = useState(0);
   const [rated, setRated] = useState(false);
   const [avgRating, setAvgRating] = useState(0);
+  const [copied, setCopied] = useState(false);
 
   const article = list[index];
+
+  // Deep link for this story — native share sheet where available, else copy.
+  const handleShare = async () => {
+    const url = `${window.location.origin}/?story=${article.id}`;
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: article.title, text: 'Some good news for you 🌍', url });
+        return;
+      } catch { /* user dismissed the sheet — fall through to copy */ }
+    }
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (err) {
+      console.error('Share failed:', err);
+    }
+  };
 
   // Reset per-article state when paging.
   useEffect(() => {
@@ -125,6 +144,9 @@ export default function NewsModal({ articles, onClose }) {
             >
               Read Full Story →
             </a>
+            <button className="btn-close" onClick={handleShare}>
+              {copied ? '✓ Link copied!' : '↗ Share'}
+            </button>
             <button className="btn-close" onClick={onClose}>
               Close
             </button>

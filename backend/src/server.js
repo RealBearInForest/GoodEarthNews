@@ -43,8 +43,20 @@ async function runDailyJob() {
   }
 }
 
-// Manual trigger (dev/admin): scrape toward the target, then re-feature.
+// Manual trigger (admin only): scrape toward the target, then re-feature.
+// Fail closed — this endpoint spends real API credits, so it refuses to run at
+// all unless ADMIN_TOKEN is configured, and requires the caller to present it.
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
+
 app.post('/api/fetch', async (req, res) => {
+  if (!ADMIN_TOKEN) {
+    return res.status(503).json({ error: 'Admin endpoint disabled: ADMIN_TOKEN is not configured.' });
+  }
+  // Header only — a ?token= query param would leak the secret into server and
+  // proxy logs.
+  if (req.get('x-admin-token') !== ADMIN_TOKEN) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
   try {
     const result = await fetchAndStoreArticles();
     const featured = selectDailyFeatured(dailyCount());

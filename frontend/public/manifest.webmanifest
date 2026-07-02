@@ -1,0 +1,13 @@
+{
+  "name": "Good Earth News",
+  "short_name": "GoodEarth",
+  "description": "Fly around a 3D Earth and explore only positive, AI-verified environmental news.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a1628",
+  "theme_color": "#0c182c",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

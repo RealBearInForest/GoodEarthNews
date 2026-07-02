@@ -2,15 +2,71 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import GlobeScene from '../components/Globe/GlobeScene.jsx';
 import NewsModal from '../components/UI/NewsModal.jsx';
 import { CATEGORY_COLORS, CATEGORY_ICONS } from '../components/Globe/NewsMarker.jsx';
-import { fetchArticles } from '../utils/api.js';
+import { fetchArticles, fetchArticle } from '../utils/api.js';
+import { supportsWebGL } from '../utils/quality.js';
+import { timeAgo, isNew } from '../utils/dates.js';
+
+const WEBGL_OK = typeof window !== 'undefined' && supportsWebGL();
+
+// Catches WebGL/three.js runtime crashes and swaps in the non-3D story list, so
+// a GPU hiccup never takes down the whole site.
+class GlobeErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { failed: false };
+  }
+  static getDerivedStateFromError() { return { failed: true }; }
+  componentDidCatch(err) { console.error('3D globe crashed, falling back to list:', err); }
+  render() {
+    return this.state.failed ? this.props.fallback : this.props.children;
+  }
+}
+
+// Non-3D fallback: friendly message + the plain story list.
+function StoryListFallback({ articles, onOpen }) {
+  return (
+    <div className="fallback-page">
+      <div className="fallback-note">
+        🌍 Your browser can&apos;t show the 3D globe, but the good news still works —
+        here are today&apos;s stories:
+      </div>
+      <div className="fallback-list">
+        {articles.map(a => (
+          <button key={a.id} className="story-row" onClick={() => onOpen([a])}>
+            <span className="story-row-dot" style={{ background: CATEGORY_COLORS[a.category] || '#7EE8A2' }} />
+            <span className="story-row-text">
+              <span className="story-row-source">
+                {a.source}{a.published_at ? ` · ${timeAgo(a.published_at)}` : ''}
+              </span>
+              <span className="story-row-title">{a.title}</span>
+            </span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 export default function GlobePage() {
   const [articles, setArticles] = useState([]);
   const [selected, setSelected] = useState(null); // cluster (array) or null
+  const [flyTo, setFlyTo] = useState(null);       // article the autopilot is flying to
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [activeCategory, setActiveCategory] = useState('all');
   const [panelOpen, setPanelOpen] = useState(false);
+  // Deep-link param captured ONCE at mount — before the URL-sync effect below is
+  // allowed to rewrite the URL (otherwise it would strip ?story before we read it).
+  const [pendingStoryId, setPendingStoryId] = useState(
+    () => new URLSearchParams(window.location.search).get('story'),
+  );
+
+  // Opening a story by hand (marker tap, dwell, fallback list) cancels any
+  // in-progress autopilot so arrival can't stomp the modal the user just opened.
+  const openStory = useCallback((cluster) => {
+    setFlyTo(null);
+    setSelected(cluster);
+  }, []);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -26,6 +82,40 @@ export default function GlobePage() {
 
   useEffect(() => { load(); }, [load]);
 
+  // Deep links: /?story=<id> opens that story once articles have loaded. If it's
+  // featured today we fly to it; otherwise fetch it directly and open the modal.
+  useEffect(() => {
+    if (loading || error || !pendingStoryId) return;
+    const id = pendingStoryId;
+    setPendingStoryId(null);                       // consume exactly once
+    const found = articles.find(a => String(a.id) === id);
+    if (found) {
+      if (WEBGL_OK && found.latitude != null) setFlyTo(found);
+      else setSelected([found]);
+    } else {
+      fetchArticle(id)
+        .then(a => { if (a) setSelected([a]); })
+        .catch(() => { /* stale link — ignore */ });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, error, pendingStoryId]);
+
+  // Keep the URL shareable: reflect the open story in ?story=<id>. Held off
+  // until the incoming deep link (if any) has been consumed.
+  useEffect(() => {
+    if (pendingStoryId) return;
+    const url = new URL(window.location.href);
+    if (selected && selected[0]) url.searchParams.set('story', selected[0].id);
+    else url.searchParams.delete('story');
+    window.history.replaceState(null, '', url);
+  }, [selected, pendingStoryId]);
+
+  // Autopilot finished (or was cancelled by the player taking the controls).
+  const handleFlyEnd = useCallback((arrivedArticle) => {
+    setFlyTo(null);
+    if (arrivedArticle) setSelected([arrivedArticle]);
+  }, []);
+
   // Categories actually present, with counts, for the filter bar.
   const categories = useMemo(() => {
     const counts = {};
@@ -36,6 +126,8 @@ export default function GlobePage() {
   const filteredArticles = useMemo(() => (
     activeCategory === 'all' ? articles : articles.filter(a => a.category === activeCategory)
   ), [articles, activeCategory]);
+
+  const fallback = <StoryListFallback articles={filteredArticles} onOpen={openStory} />;
 
   return (
     <div style={{ width: '100vw', height: '100vh', position: 'relative' }}>
@@ -80,11 +172,17 @@ export default function GlobePage() {
 
       {!loading && !error && articles.length > 0 && (
         <>
-          <GlobeScene
-            articles={filteredArticles}
-            onOpenArticle={setSelected}
-            activeArticle={selected}
-          />
+          {WEBGL_OK ? (
+            <GlobeErrorBoundary fallback={fallback}>
+              <GlobeScene
+                articles={filteredArticles}
+                onOpenArticle={openStory}
+                activeArticle={selected}
+                flyTo={flyTo}
+                onFlyEnd={handleFlyEnd}
+              />
+            </GlobeErrorBoundary>
+          ) : fallback}
 
           {/* Category filter bar */}
           <div className="filter-bar">
@@ -113,21 +211,29 @@ export default function GlobePage() {
             {panelOpen ? '✕ Close' : '☰ Browse stories'}
           </button>
 
-          {/* Story list panel — click any story to open it from anywhere */}
+          {/* Story list panel — pick a story and the ship flies you there */}
           <aside className={`story-panel ${panelOpen ? 'open' : ''}`}>
             <div className="story-panel-head">
               {filteredArticles.length} {activeCategory === 'all' ? '' : activeCategory + ' '}stories
+              {WEBGL_OK && <span className="story-panel-hint"> — tap one to fly there</span>}
             </div>
             <div className="story-panel-list">
               {filteredArticles.map(a => (
                 <button
                   key={a.id}
                   className="story-row"
-                  onClick={() => { setSelected([a]); setPanelOpen(false); }}
+                  onClick={() => {
+                    setPanelOpen(false);
+                    if (WEBGL_OK && a.latitude != null) setFlyTo(a);
+                    else setSelected([a]);
+                  }}
                 >
                   <span className="story-row-dot" style={{ background: CATEGORY_COLORS[a.category] || '#7EE8A2' }} />
                   <span className="story-row-text">
-                    <span className="story-row-source">{a.source}</span>
+                    <span className="story-row-source">
+                      {a.source}{a.published_at ? ` · ${timeAgo(a.published_at)}` : ''}
+                      {isNew(a.published_at) && <span className="news-new-badge">NEW</span>}
+                    </span>
                     <span className="story-row-title">{a.title}</span>
                   </span>
                 </button>

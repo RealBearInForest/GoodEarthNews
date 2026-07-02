@@ -4,6 +4,7 @@ import { useGLTF } from '@react-three/drei';
 import * as THREE from 'three';
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
 import { GLOBE_RADIUS, latLngToVec3 } from '../../utils/globeUtils.js';
+import { QUALITY } from '../../utils/quality.js';
 
 // BVH-accelerated raycasting — lets us place thousands of trees in a few ms
 // instead of brute-forcing every triangle for every point.
@@ -146,7 +147,7 @@ function mulberry32(a) {
 
 // Trees are placed where the Earth's own texture is green (vegetation), so they
 // always land on visible forest/land and never in the ocean.
-const TREE_CAP = 3500;            // max trees to place
+const TREE_CAP = QUALITY.treeCap; // max trees to place (fewer on phones)
 const TREE_MAX_SAMPLES = 160000;  // sphere samples to try before giving up
 
 // Read the Earth's base-colour texture into a CPU pixel buffer so we can test
@@ -244,9 +245,11 @@ export default function Earth() {
     // Re-flush after repositioning so raycasting uses correct world matrices
     clone.updateMatrixWorld(true);
 
-    // Traverse and enable shadow casting/receiving
+    // Traverse and enable shadow casting/receiving. The surface mesh is named so
+    // the flight controller can find it and raycast terrain height for the ship.
     clone.traverse(child => {
       if (child.isMesh) {
+        child.name          = 'earth-surface';
         child.castShadow    = true;
         child.receiveShadow = true;
       }

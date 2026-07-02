@@ -1,11 +1,12 @@
 import React, { useRef, useState, useEffect, useMemo, Suspense } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { Stars } from '@react-three/drei';
+import { Stars, useProgress } from '@react-three/drei';
 import * as THREE from 'three';
-import Earth, { getLandType, LAND_DISP, cartesianToLatLng } from './Earth.jsx';
+import Earth from './Earth.jsx';
 import Spaceship from './Spaceship.jsx';
 import NewsMarker from './NewsMarker.jsx';
-import { GLOBE_RADIUS, angularDistance } from '../../utils/globeUtils.js';
+import { GLOBE_RADIUS, angularDistance, latLngToVec3 } from '../../utils/globeUtils.js';
+import { QUALITY, IS_TOUCH } from '../../utils/quality.js';
 
 // Minimum angular separation between markers (~14°)
 const MIN_MARKER_ANGLE = 14 * Math.PI / 180;
@@ -13,6 +14,15 @@ const MIN_MARKER_ANGLE = 14 * Math.PI / 180;
 // Fly speed (radians/sec the rig sweeps around the planet)
 const SPIN_SPEED = 0.6;
 const SHIP_ALT   = 0.20;      // base altitude above the surface
+const MAX_TERRAIN = 0.35;     // ignore terrain spikes above this when hovering
+
+// Autopilot ("fly to story"): steers with the same controls as the player.
+const FLY_MAX_SPEED = 1.15;   // top angular speed (rad/s)
+const FLY_GAIN      = 1.6;    // how aggressively it closes remaining distance
+const FLY_ARRIVE    = 0.03;   // arrival threshold (rad)
+
+// Camera zoom limits (multiplier on the default camera distance)
+const ZOOM_MIN = 0.6, ZOOM_MAX = 1.8;
 
 // Ship "facing" feel — it yaws to point where it's travelling and banks into turns.
 const TURN_RATE = 4.5;        // how fast the nose swings toward travel dir (rad/s)
@@ -93,7 +103,7 @@ function ExhaustTrail({ shipPosRef, velRef }) {
 }
 
 // ─── Flight controller ─────────────────────────────────────────────────────────
-function GlobeController({ articles, onOpenArticle, hasOpenCard }) {
+function GlobeController({ articles, onOpenArticle, hasOpenCard, flyTo, onFlyEnd }) {
   // Group nearby stories into clusters so none silently overlap/disappear.
   const clusters = useMemo(() => {
     const result = [];
@@ -108,13 +118,36 @@ function GlobeController({ articles, onOpenArticle, hasOpenCard }) {
     return result;
   }, [articles]);
 
-  const { camera, gl } = useThree();
+  const { camera, gl, scene } = useThree();
 
   const shipWrapperRef = useRef();
   const shipAnimRef    = useRef();
   const keysRef        = useRef({});
   const velRef         = useRef({ x: 0, y: 0 });   // angular fly velocity (about local X / Y)
   const dragRef        = useRef({ active: false, lastX: 0, lastY: 0, velX: 0, velY: 0 });
+  const pinchRef       = useRef(null);             // distance between two touch points
+  const pointersRef    = useRef(new Map());
+  const zoomRef        = useRef(1);                // smoothed camera-distance multiplier
+  const zoomTargetRef  = useRef(1);
+  const earthMeshRef   = useRef(null);             // found lazily; used for terrain height
+  const terrainRay     = useMemo(() => { const r = new THREE.Raycaster(); r.firstHitOnly = true; return r; }, []);
+  const _rayOrigin     = useMemo(() => new THREE.Vector3(), []);
+  const _rayDir        = useMemo(() => new THREE.Vector3(), []);
+  const _axisWorld     = useMemo(() => new THREE.Vector3(), []);
+  const _invQuat       = useMemo(() => new THREE.Quaternion(), []);
+
+  // Autopilot target — {dir, article}. Set from the story panel via `flyTo`.
+  const flyRef = useRef(null);
+  useEffect(() => {
+    if (flyTo && flyTo.latitude != null && flyTo.longitude != null) {
+      flyRef.current = {
+        dir: latLngToVec3(flyTo.latitude, flyTo.longitude, 1).normalize(),
+        article: flyTo,
+      };
+    } else {
+      flyRef.current = null;
+    }
+  }, [flyTo]);
 
   // Rig orientation (ship) and a slightly-lagging camera orientation (chase feel).
   const orbitQuat  = useMemo(() => new THREE.Quaternion(), []);
@@ -141,13 +174,26 @@ function GlobeController({ articles, onOpenArticle, hasOpenCard }) {
     };
   }, []);
 
-  // Pointer drag / touch flight. Listeners live on the canvas so drags starting
-  // on a news card (a DOM overlay) don't move the ship.
+  // Pointer drag / touch flight + pinch and wheel zoom. Listeners live on the
+  // canvas so gestures starting on a news card (a DOM overlay) don't move the ship.
   useEffect(() => {
     const el = gl.domElement;
     const CAP = SPIN_SPEED * 2.5;
+    const pointers = pointersRef.current;
+
+    const pinchDist = () => {
+      const [a, b] = [...pointers.values()];
+      return Math.hypot(a.x - b.x, a.y - b.y);
+    };
 
     const onDown = (e) => {
+      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pointers.size === 2) {
+        // Second finger down → switch from drag to pinch.
+        dragRef.current.active = false;
+        pinchRef.current = pinchDist();
+        return;
+      }
       dragRef.current.active = true;
       dragRef.current.lastX  = e.clientX;
       dragRef.current.lastY  = e.clientY;
@@ -155,6 +201,17 @@ function GlobeController({ articles, onOpenArticle, hasOpenCard }) {
       el.setPointerCapture?.(e.pointerId);
     };
     const onMove = (e) => {
+      if (pointers.has(e.pointerId)) pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pointers.size >= 2 && pinchRef.current) {
+        const d = pinchDist();
+        if (d > 0) {
+          zoomTargetRef.current = THREE.MathUtils.clamp(
+            zoomTargetRef.current * (pinchRef.current / d), ZOOM_MIN, ZOOM_MAX,
+          );
+          pinchRef.current = d;
+        }
+        return;
+      }
       if (!dragRef.current.active) return;
       const dx = e.clientX - dragRef.current.lastX;
       const dy = e.clientY - dragRef.current.lastY;
@@ -165,17 +222,34 @@ function GlobeController({ articles, onOpenArticle, hasOpenCard }) {
       dragRef.current.velX = THREE.MathUtils.clamp(dy / window.innerHeight * 14, -CAP, CAP);
     };
     const onUp = (e) => {
-      dragRef.current.active = false;
+      pointers.delete(e.pointerId);
+      if (pointers.size < 2) pinchRef.current = null;
+      if (pointers.size === 1) {
+        // Pinch ended with one finger still down — hand it back to drag-to-fly.
+        const [rest] = pointers.values();
+        dragRef.current.active = true;
+        dragRef.current.lastX  = rest.x;
+        dragRef.current.lastY  = rest.y;
+        dragRef.current.velX = dragRef.current.velY = 0;
+      }
+      if (pointers.size === 0) dragRef.current.active = false;
       el.releasePointerCapture?.(e.pointerId);
+    };
+    const onWheel = (e) => {
+      zoomTargetRef.current = THREE.MathUtils.clamp(
+        zoomTargetRef.current * Math.exp(e.deltaY * 0.001), ZOOM_MIN, ZOOM_MAX,
+      );
     };
 
     el.style.touchAction = 'none';
     el.addEventListener('pointerdown', onDown);
+    el.addEventListener('wheel', onWheel, { passive: true });
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
     window.addEventListener('pointercancel', onUp);
     return () => {
       el.removeEventListener('pointerdown', onDown);
+      el.removeEventListener('wheel', onWheel);
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('pointercancel', onUp);
@@ -202,6 +276,37 @@ function GlobeController({ articles, onOpenArticle, hasOpenCard }) {
       dragRef.current.velY *= 0.85;
     }
 
+    // ── Autopilot: steer toward the requested story using the same controls the
+    // player has, so banking/trail/heading all behave naturally. Any manual
+    // input cancels it.
+    if (flyRef.current) {
+      const userInput = fwd || back || left || right || dragRef.current.active;
+      if (userInput) {
+        flyRef.current = null;
+        onFlyEnd?.(null);                                  // cancelled — player took over
+      } else {
+        const t = flyRef.current;
+        const cur = shipDirRef.current;
+        const angle = cur.angleTo(t.dir);
+        if (angle < FLY_ARRIVE) {
+          flyRef.current = null;
+          onFlyEnd?.(t.article);                           // arrived — open the story
+        } else {
+          _axisWorld.crossVectors(cur, t.dir);
+          if (_axisWorld.lengthSq() > 1e-10) {
+            _axisWorld.normalize();
+            _invQuat.copy(orbitQuat).invert();
+            _axisWorld.applyQuaternion(_invQuat);         // rig-local rotation axis (z ≈ 0)
+            const speed = Math.min(FLY_MAX_SPEED, FLY_GAIN * angle);
+            tgtX = _axisWorld.x * speed;
+            tgtY = _axisWorld.y * speed;
+          } else {
+            tgtX = FLY_MAX_SPEED;                          // antipodal target — pitch away
+          }
+        }
+      }
+    }
+
     const smooth = 1 - Math.pow(0.008, delta);
     velRef.current.x = THREE.MathUtils.lerp(velRef.current.x, tgtX, smooth);
     velRef.current.y = THREE.MathUtils.lerp(velRef.current.y, tgtY, smooth);
@@ -216,10 +321,23 @@ function GlobeController({ articles, onOpenArticle, hasOpenCard }) {
     camQuat.slerp(orbitQuat, 1 - Math.pow(0.0006, delta));
 
     // ── Ship position, terrain-aware altitude ──
+    // Raycast the actual Earth mesh below the ship (BVH-accelerated) so the
+    // hover height follows the real rendered terrain, not an approximate map.
     shipDirRef.current.set(0, 0, 1).applyQuaternion(orbitQuat);
-    const { lat, lng } = cartesianToLatLng(shipDirRef.current.x, shipDirRef.current.y, shipDirRef.current.z);
-    const isLand = getLandType(lat, lng) !== 0;
-    const targetR = GLOBE_RADIUS + SHIP_ALT + (isLand ? LAND_DISP : 0);
+    if (!earthMeshRef.current) {
+      earthMeshRef.current = scene.getObjectByName('earth-surface') || null;
+    }
+    let surfaceR = GLOBE_RADIUS;
+    if (earthMeshRef.current) {
+      _rayOrigin.copy(shipDirRef.current).multiplyScalar(GLOBE_RADIUS * 1.6);
+      _rayDir.copy(shipDirRef.current).negate();
+      terrainRay.set(_rayOrigin, _rayDir);
+      const hit = terrainRay.intersectObject(earthMeshRef.current, false)[0];
+      if (hit) {
+        surfaceR = THREE.MathUtils.clamp(hit.point.length(), GLOBE_RADIUS, GLOBE_RADIUS + MAX_TERRAIN);
+      }
+    }
+    const targetR = surfaceR + SHIP_ALT;
     shipRRef.current = THREE.MathUtils.lerp(shipRRef.current, targetR, 1 - Math.pow(0.0008, delta));
     shipPosRef.current.copy(shipDirRef.current).multiplyScalar(shipRRef.current);
     if (shipWrapperRef.current) {
@@ -248,8 +366,9 @@ function GlobeController({ articles, onOpenArticle, hasOpenCard }) {
       shipAnimRef.current.quaternion.copy(_q.yaw).multiply(_q.pitch).multiply(_q.bank);
     }
 
-    // ── Drive the camera from the (lagged) rig ──
-    camera.position.copy(CAM_LOCAL_POS).applyQuaternion(camQuat);
+    // ── Drive the camera from the (lagged) rig, with smoothed zoom ──
+    zoomRef.current = THREE.MathUtils.lerp(zoomRef.current, zoomTargetRef.current, 1 - Math.pow(0.002, delta));
+    camera.position.copy(CAM_LOCAL_POS).multiplyScalar(zoomRef.current).applyQuaternion(camQuat);
     camera.quaternion.copy(camQuat).multiply(CAM_LOCAL_QUAT);
   });
 
@@ -258,7 +377,7 @@ function GlobeController({ articles, onOpenArticle, hasOpenCard }) {
       {/* ── Fixed world: Earth, space, markers ─────────────────────────────── */}
       <Earth />
 
-      <Stars radius={90} depth={55} count={6000} factor={4} saturation={0.3} fade={false} />
+      <Stars radius={90} depth={55} count={QUALITY.stars} factor={4} saturation={0.3} fade={false} />
 
       {/* Sun visual — near the horizon behind/beside Earth */}
       <group position={[5, 2.5, -12]}>
@@ -336,26 +455,60 @@ function Lighting() {
   );
 }
 
-export default function GlobeScene({ articles, onOpenArticle, activeArticle }) {
+// Progress overlay while the 3D models (~1.6 MB) stream in, so slow connections
+// see a loading bar instead of an empty half-built planet.
+function AssetLoader() {
+  const { active, progress } = useProgress();
+  const [done, setDone] = useState(false);
+
+  useEffect(() => {
+    if (!active && progress >= 100) setDone(true);
+    // Safety valve: never hold the overlay hostage if a loader misreports.
+    const t = setTimeout(() => setDone(true), 8000);
+    return () => clearTimeout(t);
+  }, [active, progress]);
+
+  if (done) return null;
+  return (
+    <div className="asset-loader">
+      <div className="asset-loader-globe">🌍</div>
+      <div className="asset-loader-track">
+        <div className="asset-loader-bar" style={{ width: `${Math.max(6, progress)}%` }} />
+      </div>
+      <div className="asset-loader-label">Preparing the planet… {Math.round(progress)}%</div>
+    </div>
+  );
+}
+
+export default function GlobeScene({ articles, onOpenArticle, activeArticle, flyTo, onFlyEnd }) {
   return (
     <div className="globe-page">
       <Canvas
         camera={{ position: [0, 0.3, 5.4], fov: 52, near: 0.1, far: 200 }}
-        gl={{ antialias: true, alpha: false }}
+        dpr={QUALITY.dpr}
+        gl={{ antialias: QUALITY.antialias, alpha: false, powerPreference: 'high-performance' }}
         style={{ background: '#000510' }}
-        shadows
+        shadows={QUALITY.shadows}
       >
         <Suspense fallback={null}>
           <Lighting />
-          <GlobeController articles={articles} onOpenArticle={onOpenArticle} hasOpenCard={!!activeArticle} />
+          <GlobeController
+            articles={articles}
+            onOpenArticle={onOpenArticle}
+            hasOpenCard={!!activeArticle}
+            flyTo={flyTo}
+            onFlyEnd={onFlyEnd}
+          />
         </Suspense>
       </Canvas>
 
+      <AssetLoader />
+
       <div className="controls-hint">
         <span className="controls-hint-keys"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> / <kbd>↑</kbd><kbd>←</kbd><kbd>↓</kbd><kbd>→</kbd></span>
-        <span>or drag to fly</span>
+        <span>{IS_TOUCH ? 'drag to fly · pinch to zoom' : 'or drag to fly · scroll to zoom'}</span>
         <span>·</span>
-        <span>Fly onto a story to read it</span>
+        <span>Tap a story to read it</span>
       </div>
     </div>
   );

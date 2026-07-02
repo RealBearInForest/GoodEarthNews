@@ -16,6 +16,8 @@ services:
     envVars:
       - key: ANTHROPIC_API_KEY
         sync: false          # set this in the Render dashboard (secret)
+      - key: ADMIN_TOKEN
+        generateValue: true  # protects POST /api/fetch; value visible in dashboard
       - key: DATA_DIR
         value: /var/data     # matches the disk mount below
       - key: NODE_VERSION
