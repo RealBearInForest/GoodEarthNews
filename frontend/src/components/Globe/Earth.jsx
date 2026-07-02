@@ -201,9 +201,20 @@ const CLOUD_DATA = (() => {
     [-30,50],[-30,140],[-30,-40],[-30,-130],
     [-46,25],[-46,115],[-46,-65],[-46,-155],
   ];
+  const UP = new THREE.Vector3(0, 1, 0);
+  const X  = new THREE.Vector3(1, 0, 0);
   return pos.map(([la, ln]) => {
     const sc = 0.055 + (Math.sin(la * 7.3 + ln * 3.1) * 0.5 + 0.5) * 0.07;
-    return { pos: latLngToVec3(la, ln, GLOBE_RADIUS + 0.52 + sc * 0.5), scale: sc };
+    const p  = latLngToVec3(la, ln, GLOBE_RADIUS + 0.52 + sc * 0.5);
+    // Lie each cloud flat against the sphere (local up = surface normal), then
+    // give every one its own deterministic spin + slight tilt so no two clouds
+    // are angled the same way.
+    const quat = new THREE.Quaternion().setFromUnitVectors(UP, p.clone().normalize());
+    const spin = (Math.sin(la * 12.9898 + ln * 78.233) * 0.5 + 0.5) * Math.PI * 2;
+    const tilt = Math.sin(la * 5.7 + ln * 9.1) * 0.28;
+    quat.multiply(new THREE.Quaternion().setFromAxisAngle(UP, spin))
+        .multiply(new THREE.Quaternion().setFromAxisAngle(X, tilt));
+    return { pos: p, scale: sc, quat };
   });
 })();
 
@@ -463,8 +474,8 @@ export default function Earth() {
 
       {/* Puffy clouds — 3 overlapping icosahedron-level-1 puffs per cloud position */}
       <group ref={cloudGroupRef}>
-        {CLOUD_DATA.map(({ pos, scale }, i) => (
-          <group key={i} position={pos}>
+        {CLOUD_DATA.map(({ pos, scale, quat }, i) => (
+          <group key={i} position={pos} quaternion={quat}>
             {/* Main centre puff */}
             <mesh scale={[scale * 1.7, scale * 0.95, scale * 1.7]}>
               <icosahedronGeometry args={[1, 1]} />
