@@ -56,6 +56,58 @@ if (!cols.includes('featured_at')) db.exec(`ALTER TABLE articles ADD COLUMN feat
 
 db.exec(`CREATE INDEX IF NOT EXISTS idx_articles_featured ON articles(featured_at)`);
 
+// Anonymous engagement events (story opens, ratings, shares). This is the OLTP
+// side of the analytics pipeline — a nightly batch job ships these to the
+// BigQuery warehouse (see warehouse.js). No PII: session_id is a random
+// per-browser-session UUID.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL,
+    article_id INTEGER,
+    category TEXT,
+    session_id TEXT,
+    meta TEXT,
+    created_at TEXT DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_events_id ON events(id);
+  CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
+`);
+
+export function insertEvent({ event_type, article_id = null, category = null, session_id = null, meta = null }) {
+  return db.prepare(`
+    INSERT INTO events (event_type, article_id, category, session_id, meta)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(event_type, article_id, category, session_id, meta);
+}
+
+// Incremental read for the warehouse export (events are append-only).
+export function getEventsAfter(id, limit = 50000) {
+  return db.prepare(`SELECT * FROM events WHERE id > ? ORDER BY id LIMIT ?`).all(id, limit);
+}
+
+export function countEvents() {
+  return db.prepare(`SELECT COUNT(*) AS n FROM events`).get().n;
+}
+
+// Full snapshot exports for the warehouse (small tables, truncate-and-reload).
+export function getAllArticlesForExport() {
+  return db.prepare(`
+    SELECT a.id, a.title, a.source, a.url, a.category, a.sentiment_score,
+           a.latitude, a.longitude, a.published_at, a.is_demo, a.featured_at,
+           a.created_at,
+           COALESCE(AVG(r.rating), 0) AS avg_rating,
+           COUNT(r.id) AS rating_count
+    FROM articles a
+    LEFT JOIN ratings r ON r.article_id = a.id
+    GROUP BY a.id
+  `).all();
+}
+
+export function getAllRatingsForExport() {
+  return db.prepare(`SELECT id, article_id, rating, created_at FROM ratings`).all();
+}
+
 // Small key/value store for one-time maintenance markers (e.g. library audits).
 db.exec(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)`);
 export function getMeta(key) {

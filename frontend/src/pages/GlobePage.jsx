@@ -5,6 +5,7 @@ import { CATEGORY_COLORS, CATEGORY_ICONS } from '../components/Globe/NewsMarker.
 import { fetchArticles, fetchArticle } from '../utils/api.js';
 import { supportsWebGL } from '../utils/quality.js';
 import { timeAgo, isNew } from '../utils/dates.js';
+import { track } from '../utils/track.js';
 
 const WEBGL_OK = typeof window !== 'undefined' && supportsWebGL();
 
@@ -61,12 +62,16 @@ export default function GlobePage() {
     () => new URLSearchParams(window.location.search).get('story'),
   );
 
-  // Opening a story by hand (marker tap, dwell, fallback list) cancels any
+  // Opening a story by hand (marker tap, E key, fallback list) cancels any
   // in-progress autopilot so arrival can't stomp the modal the user just opened.
   const openStory = useCallback((cluster) => {
     setFlyTo(null);
     setSelected(cluster);
+    if (cluster?.[0]) track('story_opened', { article: cluster[0], meta: { via: 'direct' } });
   }, []);
+
+  // One anonymous session marker per visit (feeds the analytics warehouse).
+  useEffect(() => { track('session_started'); }, []);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -113,7 +118,10 @@ export default function GlobePage() {
   // Autopilot finished (or was cancelled by the player taking the controls).
   const handleFlyEnd = useCallback((arrivedArticle) => {
     setFlyTo(null);
-    if (arrivedArticle) setSelected([arrivedArticle]);
+    if (arrivedArticle) {
+      setSelected([arrivedArticle]);
+      track('story_opened', { article: arrivedArticle, meta: { via: 'autopilot' } });
+    }
   }, []);
 
   // A rating was submitted — fold the fresh avg/count back into our article
@@ -236,8 +244,12 @@ export default function GlobePage() {
                   className="story-row"
                   onClick={() => {
                     setPanelOpen(false);
-                    if (WEBGL_OK && a.latitude != null) setFlyTo(a);
-                    else setSelected([a]);
+                    if (WEBGL_OK && a.latitude != null) {
+                      setFlyTo(a);
+                      track('fly_to_story', { article: a });
+                    } else {
+                      openStory([a]);
+                    }
                   }}
                 >
                   <span className="story-row-dot" style={{ background: CATEGORY_COLORS[a.category] || '#7EE8A2' }} />

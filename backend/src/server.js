@@ -7,13 +7,18 @@ import { existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import articlesRouter from './routes/articles.js';
 import ratingsRouter from './routes/ratings.js';
+import eventsRouter from './routes/events.js';
 import { fetchAndStoreArticles, seedDemoArticles, auditLibrary } from './newsAggregator.js';
+import { syncToWarehouse, isWarehouseConfigured } from './warehouse.js';
 import {
   selectDailyFeatured, hasFeaturedForToday, countLibrary, getFeaturedArticles,
   getMeta, setMeta, LIBRARY_TARGET, DAILY_MIN, DAILY_MAX,
 } from './db.js';
 
 const app = express();
+// Behind Render's proxy: trust X-Forwarded-For so req.ip is the visitor, not
+// the proxy (the events rate limit is per-IP).
+app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3001;
 const hasApiKey = !!process.env.ANTHROPIC_API_KEY;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -24,6 +29,7 @@ app.use(express.json());
 
 app.use('/api/articles', articlesRouter);
 app.use('/api/ratings', ratingsRouter);
+app.use('/api/events', eventsRouter);
 
 // Random number of stories to feature each day (10–15 inclusive).
 const dailyCount = () => DAILY_MIN + Math.floor(Math.random() * (DAILY_MAX - DAILY_MIN + 1));
@@ -103,6 +109,25 @@ app.post('/api/audit', (req, res) => {
   res.json({ started: true, library: countLibrary() });
 });
 
+// Manually trigger a warehouse sync (the nightly job does this automatically).
+let warehouseSyncInFlight = false;
+app.post('/api/warehouse-sync', async (req, res) => {
+  if (!ADMIN_TOKEN) return res.status(503).json({ error: 'Admin endpoint disabled: ADMIN_TOKEN is not configured.' });
+  if (req.get('x-admin-token') !== ADMIN_TOKEN) return res.status(401).json({ error: 'Unauthorized' });
+  if (!isWarehouseConfigured()) return res.status(503).json({ error: 'Warehouse not configured (GOOGLE_APPLICATION_CREDENTIALS_JSON).' });
+  if (warehouseSyncInFlight) return res.status(409).json({ error: 'A sync is already running.' });
+  warehouseSyncInFlight = true;
+  try {
+    const stats = await syncToWarehouse();
+    res.json({ success: true, ...stats });
+  } catch (err) {
+    console.error('Warehouse sync failed:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally {
+    warehouseSyncInFlight = false;
+  }
+});
+
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', time: new Date().toISOString() });
 });
@@ -134,6 +159,15 @@ app.listen(PORT, async () => {
 
   // Re-feature every day at 06:00, building the library first if it isn't full.
   schedule.scheduleJob('0 6 * * *', runDailyJob);
+
+  // Nightly warehouse ELT at 06:10 (after the daily job): ship engagement events
+  // and article/rating snapshots to BigQuery. No-op until credentials exist.
+  schedule.scheduleJob('10 6 * * *', () => {
+    syncToWarehouse().catch(err => console.error('Nightly warehouse sync failed:', err.message));
+  });
+  console.log(isWarehouseConfigured()
+    ? 'BigQuery warehouse configured — nightly ELT at 06:10.'
+    : 'BigQuery warehouse dormant (set GOOGLE_APPLICATION_CREDENTIALS_JSON to enable).');
 
   if (hasApiKey) {
     // Background startup task (non-blocking): top up the library if needed, then

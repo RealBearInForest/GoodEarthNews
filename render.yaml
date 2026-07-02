@@ -18,6 +18,10 @@ services:
         sync: false          # set this in the Render dashboard (secret)
       - key: ADMIN_TOKEN
         generateValue: true  # protects POST /api/fetch; value visible in dashboard
+      - key: GOOGLE_APPLICATION_CREDENTIALS_JSON
+        sync: false          # BigQuery service-account JSON — set in dashboard to enable the warehouse ELT
+      - key: BIGQUERY_DATASET
+        value: good_earth_news
       - key: DATA_DIR
         value: /var/data     # matches the disk mount below
       - key: NODE_VERSION

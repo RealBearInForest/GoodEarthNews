@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import StarRating from './StarRating.jsx';
 import { submitRating } from '../../utils/api.js';
+import { track } from '../../utils/track.js';
 import { CATEGORY_COLORS, CATEGORY_ICONS } from '../Globe/NewsMarker.jsx';
 
 // `articles` is the cluster opened from a marker (or a single-item list from the
@@ -18,6 +19,7 @@ export default function NewsModal({ articles, onClose, onRated }) {
 
   // Deep link for this story — native share sheet where available, else copy.
   const handleShare = async () => {
+    track('share_clicked', { article });
     const url = `${window.location.origin}/?story=${article.id}`;
     if (navigator.share) {
       try {
@@ -60,6 +62,7 @@ export default function NewsModal({ articles, onClose, onRated }) {
         onRated?.(result.article);
       }
       setRated(true);
+      track('rating_submitted', { article, meta: { rating } });
     } catch (err) {
       console.error('Rating failed:', err);
     }
