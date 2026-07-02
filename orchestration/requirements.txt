@@ -1,0 +1,7 @@
+# For running Airflow locally without Docker (see README "Option B").
+# Install with the official constraints file for a reproducible resolve:
+#   pip install "apache-airflow==2.10.4" google-cloud-bigquery requests \
+#     --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.10.4/constraints-3.11.txt"
+apache-airflow==2.10.4
+google-cloud-bigquery>=3,<4
+requests

@@ -21,3 +21,9 @@ frontend/dist/
 .DS_Store
 *.log
 .vite/
+
+# orchestration (Airflow) — local artifacts and secrets
+orchestration/.env
+orchestration/.venv/
+orchestration/.airflow/
+orchestration/gcp-key.json

@@ -1,0 +1,27 @@
+# Airflow orchestration for the Good Earth News ELT — single-container
+# standalone mode (scheduler + webserver + SQLite metadata), which is the right
+# size for one nightly DAG. Run from this directory:
+#
+#   cp .env.example .env       # fill in the two values
+#   docker compose up
+#   → UI at http://localhost:8080 (credentials printed in the container log)
+#
+services:
+  airflow:
+    image: apache/airflow:2.10.4-python3.11
+    command: standalone
+    ports:
+      - "8080:8080"
+    environment:
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/goodearth/orchestration/dags
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      GOOGLE_APPLICATION_CREDENTIALS: /opt/goodearth/orchestration/gcp-key.json
+      GEW_ADMIN_TOKEN: ${GEW_ADMIN_TOKEN:-}
+      GEW_BASE_URL: ${GEW_BASE_URL:-https://goodearthnews.org}
+      BIGQUERY_DATASET: ${BIGQUERY_DATASET:-good_earth_news}
+      _PIP_ADDITIONAL_REQUIREMENTS: google-cloud-bigquery==3.*
+    volumes:
+      # repo mounted read-only: the DAG reads analytics/queries/*.sql from it
+      - ..:/opt/goodearth:ro
+      # service-account key mounted from wherever .env points (never committed)
+      - ${GOOGLE_KEY_FILE}:/opt/goodearth/orchestration/gcp-key.json:ro
