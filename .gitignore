@@ -27,3 +27,7 @@ orchestration/.env
 orchestration/.venv/
 orchestration/.airflow/
 orchestration/gcp-key.json
+
+# python bytecode
+__pycache__/
+*.pyc
