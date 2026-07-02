@@ -24,6 +24,12 @@ const FLY_ARRIVE    = 0.03;   // arrival threshold (rad)
 // Camera zoom limits (multiplier on the default camera distance)
 const ZOOM_MIN = 0.6, ZOOM_MAX = 1.8;
 
+// Touch steering ("follow the finger"): the ship flies toward wherever the
+// finger is held, faster the farther it is from the ship on screen.
+const TOUCH_DEADZONE   = 24;                 // px around the ship = hover in place
+const TOUCH_FULL_RANGE = 0.38;               // fraction of min(viewport) to reach full speed
+const TOUCH_MAX_SPEED  = SPIN_SPEED * 1.5;   // full-stretch finger beats the keyboard
+
 // Ship "facing" feel — it yaws to point where it's travelling and banks into turns.
 const TURN_RATE = 4.5;        // how fast the nose swings toward travel dir (rad/s)
 const BANK_K    = 1.3;        // bank per radian of remaining turn
@@ -125,8 +131,10 @@ function GlobeController({ articles, onOpenArticle, hasOpenCard, flyTo, onFlyEnd
   const keysRef        = useRef({});
   const velRef         = useRef({ x: 0, y: 0 });   // angular fly velocity (about local X / Y)
   const dragRef        = useRef({ active: false, lastX: 0, lastY: 0, velX: 0, velY: 0 });
+  const touchRef       = useRef({ active: false, x: 0, y: 0 });  // finger-follow steering
   const pinchRef       = useRef(null);             // distance between two touch points
   const pointersRef    = useRef(new Map());
+  const _shipScreen    = useMemo(() => new THREE.Vector3(), []);
   const zoomRef        = useRef(1);                // smoothed camera-distance multiplier
   const zoomTargetRef  = useRef(1);
   const earthMeshRef   = useRef(null);             // found lazily; used for terrain height
@@ -187,21 +195,30 @@ function GlobeController({ articles, onOpenArticle, hasOpenCard, flyTo, onFlyEnd
     };
 
     const onDown = (e) => {
-      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, touch: e.pointerType === 'touch' });
       if (pointers.size === 2) {
-        // Second finger down → switch from drag to pinch.
+        // Second finger down → switch from steer/drag to pinch.
         dragRef.current.active = false;
+        touchRef.current.active = false;
         pinchRef.current = pinchDist();
         return;
       }
-      dragRef.current.active = true;
-      dragRef.current.lastX  = e.clientX;
-      dragRef.current.lastY  = e.clientY;
-      dragRef.current.velX = dragRef.current.velY = 0;
+      if (e.pointerType === 'touch') {
+        // Finger-follow steering: the ship flies toward the held finger.
+        touchRef.current = { active: true, x: e.clientX, y: e.clientY };
+      } else {
+        // Mouse/pen keep grab-and-drag flight.
+        dragRef.current.active = true;
+        dragRef.current.lastX  = e.clientX;
+        dragRef.current.lastY  = e.clientY;
+        dragRef.current.velX = dragRef.current.velY = 0;
+      }
       el.setPointerCapture?.(e.pointerId);
     };
     const onMove = (e) => {
-      if (pointers.has(e.pointerId)) pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pointers.has(e.pointerId)) {
+        pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, touch: e.pointerType === 'touch' });
+      }
       if (pointers.size >= 2 && pinchRef.current) {
         const d = pinchDist();
         if (d > 0) {
@@ -212,12 +229,16 @@ function GlobeController({ articles, onOpenArticle, hasOpenCard, flyTo, onFlyEnd
         }
         return;
       }
+      if (touchRef.current.active && e.pointerType === 'touch') {
+        touchRef.current.x = e.clientX;
+        touchRef.current.y = e.clientY;
+        return;
+      }
       if (!dragRef.current.active) return;
       const dx = e.clientX - dragRef.current.lastX;
       const dy = e.clientY - dragRef.current.lastY;
       dragRef.current.lastX = e.clientX;
       dragRef.current.lastY = e.clientY;
-      // Drag the planet: dragging right flies the ship left, dragging down flies up.
       dragRef.current.velY = THREE.MathUtils.clamp(dx / window.innerWidth  * 14, -CAP, CAP);
       dragRef.current.velX = THREE.MathUtils.clamp(dy / window.innerHeight * 14, -CAP, CAP);
     };
@@ -225,14 +246,21 @@ function GlobeController({ articles, onOpenArticle, hasOpenCard, flyTo, onFlyEnd
       pointers.delete(e.pointerId);
       if (pointers.size < 2) pinchRef.current = null;
       if (pointers.size === 1) {
-        // Pinch ended with one finger still down — hand it back to drag-to-fly.
+        // Pinch ended with one pointer still down — hand it back to its mode.
         const [rest] = pointers.values();
-        dragRef.current.active = true;
-        dragRef.current.lastX  = rest.x;
-        dragRef.current.lastY  = rest.y;
-        dragRef.current.velX = dragRef.current.velY = 0;
+        if (rest.touch) {
+          touchRef.current = { active: true, x: rest.x, y: rest.y };
+        } else {
+          dragRef.current.active = true;
+          dragRef.current.lastX  = rest.x;
+          dragRef.current.lastY  = rest.y;
+          dragRef.current.velX = dragRef.current.velY = 0;
+        }
       }
-      if (pointers.size === 0) dragRef.current.active = false;
+      if (pointers.size === 0) {
+        dragRef.current.active = false;
+        touchRef.current.active = false;
+      }
       el.releasePointerCapture?.(e.pointerId);
     };
     const onWheel = (e) => {
@@ -276,11 +304,34 @@ function GlobeController({ articles, onOpenArticle, hasOpenCard, flyTo, onFlyEnd
       dragRef.current.velY *= 0.85;
     }
 
+    // ── Finger-follow steering (touch): fly toward the held finger, faster the
+    // farther it is from the ship on screen. A small deadzone means a finger
+    // resting on the ship hovers in place.
+    if (touchRef.current.active && !pinchRef.current) {
+      _shipScreen.copy(shipPosRef.current).project(camera);
+      const w = gl.domElement.clientWidth, h = gl.domElement.clientHeight;
+      const sx = (_shipScreen.x + 1) * 0.5 * w;
+      const sy = (1 - _shipScreen.y) * 0.5 * h;
+      const dx = touchRef.current.x - sx;
+      const dy = touchRef.current.y - sy;
+      const dist = Math.hypot(dx, dy);
+      if (dist > TOUCH_DEADZONE) {
+        const range = Math.min(w, h) * TOUCH_FULL_RANGE;
+        const speed = Math.min((dist - TOUCH_DEADZONE) / range, 1) * TOUCH_MAX_SPEED;
+        tgtX = (dy / dist) * speed;   // screen-down finger → fly down-screen
+        tgtY = (dx / dist) * speed;   // screen-right finger → fly right-screen
+      } else if (!(fwd || back || left || right)) {
+        // Finger resting on the ship = hover — but never fight the keyboard on
+        // touch-laptop hybrids.
+        tgtX = tgtY = 0;
+      }
+    }
+
     // ── Autopilot: steer toward the requested story using the same controls the
     // player has, so banking/trail/heading all behave naturally. Any manual
     // input cancels it.
     if (flyRef.current) {
-      const userInput = fwd || back || left || right || dragRef.current.active;
+      const userInput = fwd || back || left || right || dragRef.current.active || touchRef.current.active;
       if (userInput) {
         flyRef.current = null;
         onFlyEnd?.(null);                                  // cancelled — player took over
@@ -506,7 +557,7 @@ export default function GlobeScene({ articles, onOpenArticle, activeArticle, fly
 
       <div className="controls-hint">
         <span className="controls-hint-keys"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> / <kbd>↑</kbd><kbd>←</kbd><kbd>↓</kbd><kbd>→</kbd></span>
-        <span>{IS_TOUCH ? 'drag to fly · pinch to zoom' : 'or drag to fly · scroll to zoom'}</span>
+        <span>{IS_TOUCH ? 'hold a finger to fly toward it · pinch to zoom' : 'or drag to fly · scroll to zoom'}</span>
         <span>·</span>
         <span>Tap a story to read it</span>
       </div>

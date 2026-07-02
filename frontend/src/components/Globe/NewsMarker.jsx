@@ -1,9 +1,8 @@
-import { useRef, useState, useMemo } from 'react';
+import { useRef, useState, useMemo, useEffect } from 'react';
 import { useFrame } from '@react-three/fiber';
 import { Html } from '@react-three/drei';
-import * as THREE from 'three';
 import { latLngToVec3, GLOBE_RADIUS } from '../../utils/globeUtils.js';
-import { timeAgo, isNew } from '../../utils/dates.js';
+import { IS_TOUCH } from '../../utils/quality.js';
 
 export const CATEGORY_COLORS = {
   animals:      '#7EE8A2',
@@ -25,14 +24,17 @@ export const CATEGORY_ICONS = {
   environment:  '🌍',
 };
 
-// You must fly the ship almost directly onto a marker before its card appears.
-// Kept below half the 14° inter-marker spacing so only one card is active at once.
+// You must fly the ship almost directly onto a marker before its prompt appears.
+// Kept below half the 14° inter-marker spacing so only one prompt is active at once.
 const SHOW_ANGLE = 0.11;
-const DWELL_MS   = 1600;
 
 // `cluster` is an array of one or more articles sharing roughly the same spot.
 // The marker is anchored on the first (newest) article; opening hands the whole
 // cluster to the modal so the reader can page through co-located stories.
+//
+// Flying onto a marker shows a small "Open story?" prompt — the reader chooses
+// to open it (click/tap or press E). Nothing auto-opens, so closing the modal
+// while parked on a marker never re-opens it.
 export default function NewsMarker({ cluster, shipDirRef, onOpen, hasOpenCard }) {
   const primary = cluster[0];
   const count   = cluster.length;
@@ -40,18 +42,29 @@ export default function NewsMarker({ cluster, shipDirRef, onOpen, hasOpenCard })
   const dotRef     = useRef();
   const glow1Ref   = useRef();
   const glow2Ref   = useRef();
-  const dwellStart = useRef(null);
-  const facingRef  = useRef(0);   // read by the tap handler (front hemisphere only)
-
-  const dwellBarRef   = useRef(null);
-  const dwellLabelRef = useRef(null);
+  const facingRef  = useRef(0);      // read by the tap handler (front hemisphere only)
+  const isNearRef  = useRef(false);  // read by the key handler
+  const openRef    = useRef(hasOpenCard);
+  openRef.current  = hasOpenCard;
   const [isNear, setIsNear] = useState(false);
 
   // Raised above the highest possible terrain so markers never sink into mountains.
   const localPos = latLngToVec3(primary.latitude, primary.longitude, GLOBE_RADIUS + 0.30);
-  // The Earth is fixed in world space now, so the marker's direction is constant.
+  // The Earth is fixed in world space, so the marker's direction is constant.
   const markerDir = useMemo(() => localPos.clone().normalize(), [localPos]);
   const color    = CATEGORY_COLORS[primary.category] || '#7EE8A2';
+
+  // Press E while parked on this marker to open it (desktop). Reads refs so the
+  // listener never needs re-subscribing per frame.
+  useEffect(() => {
+    const onKey = (e) => {
+      if ((e.key === 'e' || e.key === 'E') && isNearRef.current && !openRef.current) {
+        onOpen(cluster);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [cluster, onOpen]);
 
   useFrame(() => {
     if (!dotRef.current || !shipDirRef?.current) return;
@@ -61,25 +74,9 @@ export default function NewsMarker({ cluster, shipDirRef, onOpen, hasOpenCard })
     facingRef.current = facing;
 
     const show = markerDir.angleTo(shipDir) < SHOW_ANGLE;
+    isNearRef.current = show;
     // Only push state when it actually changes — avoids a re-render every frame.
     if (show !== isNear) setIsNear(show);
-
-    // Dwell — update DOM directly so the bar fills reliably at 60fps
-    if (show && !hasOpenCard) {
-      if (!dwellStart.current) dwellStart.current = Date.now();
-      const progress = Math.min(1, (Date.now() - dwellStart.current) / DWELL_MS);
-      if (dwellBarRef.current)   dwellBarRef.current.style.width = `${progress * 100}%`;
-      if (dwellLabelRef.current) dwellLabelRef.current.textContent = progress > 0.02 ? 'Opening…' : 'Tap, or hold still to open';
-      if (progress >= 1) {
-        dwellStart.current = null;
-        if (dwellBarRef.current) dwellBarRef.current.style.width = '0%';
-        onOpen(cluster);
-      }
-    } else if (dwellStart.current) {
-      dwellStart.current = null;
-      if (dwellBarRef.current)   dwellBarRef.current.style.width = '0%';
-      if (dwellLabelRef.current) dwellLabelRef.current.textContent = 'Tap, or hold still to open';
-    }
 
     const t = Date.now();
     const pulse = 1 + Math.sin(t * 0.003) * 0.18;
@@ -148,7 +145,8 @@ export default function NewsMarker({ cluster, shipDirRef, onOpen, hasOpenCard })
         </mesh>
       )}
 
-      {/* HTML card — only when near and no card is open */}
+      {/* Small "Open story?" prompt — shown when parked on the marker. The full
+          card only opens when the reader asks for it. */}
       {isNear && !hasOpenCard && (
         <Html
           position={[0, 0.06, 0]}
@@ -156,55 +154,17 @@ export default function NewsMarker({ cluster, shipDirRef, onOpen, hasOpenCard })
           distanceFactor={4}
           style={{ pointerEvents: 'auto' }}
         >
-          <div
-            className="news-card-popup"
+          <button
+            className="news-mini-card"
             onClick={() => onOpen(cluster)}
-            style={{ borderTop: `3px solid ${color}` }}
+            style={{ borderColor: `${color}80` }}
           >
-            {primary.image_url && (
-              <div
-                className="news-card-image"
-                style={{ backgroundImage: `url("${primary.image_url}")` }}
-              />
-            )}
-            <div className="news-card-source">
-              {CATEGORY_ICONS[primary.category] || '🌍'} {primary.source}
-              {primary.published_at && (
-                <span className="news-card-date"> · {timeAgo(primary.published_at)}</span>
-              )}
-              {isNew(primary.published_at) && <span className="news-new-badge">NEW</span>}
-            </div>
-            <div className="news-card-title">
-              {primary.title.length > 75
-                ? primary.title.slice(0, 75) + '…'
-                : primary.title}
-            </div>
-            <div className="news-card-footer">
-              <span
-                className="news-card-category"
-                style={{ background: `${color}22`, color }}
-              >
-                {primary.category}
-              </span>
-              {count > 1 && (
-                <span className="news-card-more">+{count - 1} more here</span>
-              )}
-            </div>
-
-            <div className="news-card-dwell">
-              <div
-                ref={dwellBarRef}
-                className="news-card-dwell-bar"
-                style={{ width: '0%', transition: 'none' }}
-              />
-            </div>
-            <div
-              ref={dwellLabelRef}
-              style={{ fontSize: 10, color: '#aaa', marginTop: 4, fontStyle: 'italic' }}
-            >
-              Tap, or hold still to open
-            </div>
-          </div>
+            <span className="news-mini-icon">{CATEGORY_ICONS[primary.category] || '🌍'}</span>
+            <span className="news-mini-label">
+              Open {count > 1 ? `${count} stories` : 'story'}?
+            </span>
+            {!IS_TOUCH && <kbd className="news-mini-kbd">E</kbd>}
+          </button>
         </Html>
       )}
 

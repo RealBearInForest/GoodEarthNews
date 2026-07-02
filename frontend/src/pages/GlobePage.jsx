@@ -116,6 +116,18 @@ export default function GlobePage() {
     if (arrivedArticle) setSelected([arrivedArticle]);
   }, []);
 
+  // A rating was submitted — fold the fresh avg/count back into our article
+  // list AND the open cluster, so both reopening the story and paging away/back
+  // within a cluster show it (the list is only fetched once).
+  const handleRated = useCallback((updated) => {
+    const merge = (a) =>
+      a.id === updated.id
+        ? { ...a, avg_rating: updated.avg_rating, rating_count: updated.rating_count }
+        : a;
+    setArticles(prev => prev.map(merge));
+    setSelected(prev => (prev ? prev.map(merge) : prev));
+  }, []);
+
   // Categories actually present, with counts, for the filter bar.
   const categories = useMemo(() => {
     const counts = {};
@@ -247,6 +259,7 @@ export default function GlobePage() {
         <NewsModal
           articles={selected}
           onClose={() => setSelected(null)}
+          onRated={handleRated}
         />
       )}
     </div>

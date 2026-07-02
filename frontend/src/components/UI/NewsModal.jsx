@@ -6,11 +6,12 @@ import { CATEGORY_COLORS, CATEGORY_ICONS } from '../Globe/NewsMarker.jsx';
 
 // `articles` is the cluster opened from a marker (or a single-item list from the
 // story panel). The modal pages through co-located stories.
-export default function NewsModal({ articles, onClose }) {
+export default function NewsModal({ articles, onClose, onRated }) {
   const list = Array.isArray(articles) ? articles : articles ? [articles] : [];
   const [index, setIndex] = useState(0);
   const [rated, setRated] = useState(false);
   const [avgRating, setAvgRating] = useState(0);
+  const [ratingCount, setRatingCount] = useState(0);
   const [copied, setCopied] = useState(false);
 
   const article = list[index];
@@ -33,11 +34,15 @@ export default function NewsModal({ articles, onClose }) {
     }
   };
 
-  // Reset per-article state when paging.
+  // Reset per-article state when paging. Keyed on the article's id (not object
+  // identity) so a post-rating data refresh of the same story doesn't wipe the
+  // "thanks for rating" state and re-enable the stars.
   useEffect(() => {
     setRated(false);
     setAvgRating(article?.avg_rating || 0);
-  }, [index, article]);
+    setRatingCount(article?.rating_count || 0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [index, article?.id]);
 
   if (!article) return null;
 
@@ -47,7 +52,13 @@ export default function NewsModal({ articles, onClose }) {
   const handleRate = async (rating) => {
     try {
       const result = await submitRating(article.id, rating);
-      setAvgRating(result.article?.avg_rating || avgRating);
+      if (result.article) {
+        setAvgRating(result.article.avg_rating || 0);
+        setRatingCount(result.article.rating_count || 0);
+        // Sync the fresh numbers into the page's article list so the rating
+        // survives closing and reopening the story.
+        onRated?.(result.article);
+      }
       setRated(true);
     } catch (err) {
       console.error('Rating failed:', err);
@@ -116,7 +127,7 @@ export default function NewsModal({ articles, onClose }) {
             <span>📰 {article.source}</span>
             {article.published_at && <span>· {formatDate(article.published_at)}</span>}
             {avgRating > 0 && (
-              <span>· ⭐ {Number(avgRating).toFixed(1)} ({article.rating_count} ratings)</span>
+              <span>· ⭐ {Number(avgRating).toFixed(1)} ({ratingCount} rating{ratingCount === 1 ? '' : 's'})</span>
             )}
           </div>
 
