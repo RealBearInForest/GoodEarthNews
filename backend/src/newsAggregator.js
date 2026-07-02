@@ -2,7 +2,8 @@ import Parser from 'rss-parser';
 import { analyzeArticle } from './sentimentAnalyzer.js';
 import { geocodeArticle } from './geocoder.js';
 import {
-  insertArticle, hasArticle, deleteDemoArticles, countLibrary, countAll, LIBRARY_TARGET, DAILY_MAX,
+  insertArticle, hasArticle, deleteDemoArticles, countLibrary, countAll,
+  getLibraryArticles, deleteArticle, LIBRARY_TARGET, DAILY_MAX,
 } from './db.js';
 
 const parser = new Parser({
@@ -82,7 +83,7 @@ export async function fetchAndStoreArticles() {
   const totalFetched = allItems.length;
 
   let library = countLibrary();
-  let analyzed = 0, skipped = 0, totalStored = 0;
+  let analyzed = 0, skipped = 0, totalStored = 0, failures = 0;
 
   // Process articles with rate limiting (avoid hitting API too fast)
   for (const item of allItems) {
@@ -94,10 +95,13 @@ export async function fetchAndStoreArticles() {
     if (hasArticle(item.url)) { skipped++; continue; }
 
     try {
-      // Analyze with Claude AI (also returns the story's location)
+      // Analyze with Claude AI (also returns the story's location).
+      // FAIL CLOSED: only an explicit 'approved' verdict stores an article.
+      // Analysis errors are counted and skipped — never guessed at.
       const analysis = await analyzeArticle(item.title, item.description);
       analyzed++;
-      if (!analysis) continue;
+      if (analysis.verdict === 'error') { failures++; continue; }
+      if (analysis.verdict !== 'approved') continue;
 
       // Prefer Claude's coordinates; fall back to keyword geocoding.
       let { latitude, longitude } = analysis;
@@ -130,12 +134,56 @@ export async function fetchAndStoreArticles() {
   let demoRemoved = 0;
   if (countLibrary() >= DAILY_MAX) demoRemoved = deleteDemoArticles();
 
+  if (failures > 0) {
+    console.error(`⚠ ${failures} article(s) could not be verified by Claude and were SKIPPED (fail-closed). Check the API key / rate limits.`);
+  }
   console.log(
     `News fetch complete: ${totalFetched} fetched, ${analyzed} analyzed, ` +
-    `${skipped} already known, ${totalStored} new stored, library ${countLibrary()}/${LIBRARY_TARGET}` +
+    `${skipped} already known, ${totalStored} new stored, ${failures} unverifiable, ` +
+    `library ${countLibrary()}/${LIBRARY_TARGET}` +
     (demoRemoved ? `, ${demoRemoved} demo removed` : '')
   );
-  return { totalFetched, analyzed, skipped, totalStored, library: countLibrary() };
+  return { totalFetched, analyzed, skipped, totalStored, failures, library: countLibrary() };
+}
+
+// Re-verify every library article through Claude and purge the ones it rejects.
+// Exists because a since-removed keyword fallback could store unverified
+// articles when the Claude call failed (that's how a drowning story briefly
+// made it onto the globe).
+//
+// Safety: deletion requires an explicit 'rejected' verdict from Claude. Errors
+// (rate limits, bad key, outages) leave the article in place and are only
+// counted — an outage must never be able to wipe the library.
+export async function auditLibrary() {
+  if (!process.env.ANTHROPIC_API_KEY) {
+    console.warn('Library audit skipped: no ANTHROPIC_API_KEY.');
+    return { aborted: true };
+  }
+
+  const articles = getLibraryArticles();
+  console.log(`Auditing ${articles.length} library articles…`);
+  let kept = 0, removed = 0, unverifiable = 0;
+
+  for (const a of articles) {
+    // No keyword pre-filter here: an audited article is only removed when
+    // Claude itself rejects it.
+    const analysis = await analyzeArticle(a.title, a.description, { prefilter: false });
+    if (analysis.verdict === 'rejected') {
+      // Count only rows actually deleted (guards stats against overlapping runs).
+      if (deleteArticle(a.id) > 0) {
+        removed++;
+        console.log(`  ✗ removed [${a.id}] "${a.title.slice(0, 70)}"`);
+      }
+    } else if (analysis.verdict === 'error') {
+      unverifiable++;    // kept — never delete what we couldn't check
+    } else {
+      kept++;
+    }
+    await new Promise(r => setTimeout(r, 250));
+  }
+
+  console.log(`Library audit done: ${kept} kept, ${removed} removed, ${unverifiable} unverifiable (kept), library now ${countLibrary()}.`);
+  return { kept, removed, unverifiable, library: countLibrary() };
 }
 
 // Seed mock articles only into a fresh, empty database so the globe has content

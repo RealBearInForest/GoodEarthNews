@@ -7,10 +7,10 @@ import { existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import articlesRouter from './routes/articles.js';
 import ratingsRouter from './routes/ratings.js';
-import { fetchAndStoreArticles, seedDemoArticles } from './newsAggregator.js';
+import { fetchAndStoreArticles, seedDemoArticles, auditLibrary } from './newsAggregator.js';
 import {
-  selectDailyFeatured, hasFeaturedForToday, countLibrary,
-  LIBRARY_TARGET, DAILY_MIN, DAILY_MAX,
+  selectDailyFeatured, hasFeaturedForToday, countLibrary, getFeaturedArticles,
+  getMeta, setMeta, LIBRARY_TARGET, DAILY_MIN, DAILY_MAX,
 } from './db.js';
 
 const app = express();
@@ -66,6 +66,43 @@ app.post('/api/fetch', async (req, res) => {
   }
 });
 
+// Re-verify the whole library through Claude, purging rejects. Runs once
+// automatically at boot (marker below); the endpoint forces a manual re-run.
+// A module-level in-flight promise serializes runs so the boot audit and the
+// endpoint (or repeated POSTs) can never double-spend on overlapping passes.
+let auditInFlight = null;
+
+function runLibraryAudit() {
+  if (auditInFlight) return auditInFlight;
+  auditInFlight = (async () => {
+    const result = await auditLibrary();
+    if (result.aborted) return result;
+    // Trust the audit only if the vast majority of articles were checkable —
+    // a broken key / outage shouldn't be recorded as a completed audit.
+    const checked = result.kept + result.removed;
+    if (checked > 0 && result.unverifiable <= checked * 0.1) {
+      setMeta('library_audit_failclosed', 'done');
+    }
+    // Top the featured set back up if the purge left today's globe too empty.
+    if (getFeaturedArticles().length < DAILY_MIN) {
+      const n = selectDailyFeatured(dailyCount());
+      console.log(`Featured set refreshed after audit (${n} stories).`);
+    }
+    return result;
+  })().finally(() => { auditInFlight = null; });
+  return auditInFlight;
+}
+
+app.post('/api/audit', (req, res) => {
+  if (!ADMIN_TOKEN) return res.status(503).json({ error: 'Admin endpoint disabled: ADMIN_TOKEN is not configured.' });
+  if (req.get('x-admin-token') !== ADMIN_TOKEN) return res.status(401).json({ error: 'Unauthorized' });
+  if (!hasApiKey) return res.status(503).json({ error: 'ANTHROPIC_API_KEY is not configured — nothing to audit with.' });
+  if (auditInFlight) return res.status(409).json({ error: 'An audit is already running.' });
+  // Long-running — kick off in the background and return immediately.
+  runLibraryAudit().catch(err => console.error('Audit failed:', err.message));
+  res.json({ started: true, library: countLibrary() });
+});
+
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', time: new Date().toISOString() });
 });
@@ -99,13 +136,32 @@ app.listen(PORT, async () => {
   schedule.scheduleJob('0 6 * * *', runDailyJob);
 
   if (hasApiKey) {
-    if (countLibrary() < LIBRARY_TARGET) {
-      // Keep building toward the target in the background (non-blocking startup).
-      console.log(`Library ${countLibrary()}/${LIBRARY_TARGET} — building in the background…`);
-      setTimeout(() => runDailyJob(), 3000);
-    } else {
-      console.log(`Library full (${countLibrary()}/${LIBRARY_TARGET}) — serving stored articles, no scraping.`);
-    }
+    // Background startup task (non-blocking): top up the library if needed, then
+    // run the one-time fail-closed quality audit over everything already stored
+    // (purges articles that predate the removal of the keyword fallback).
+    setTimeout(async () => {
+      try {
+        const libraryAtBoot = countLibrary();
+        if (libraryAtBoot < LIBRARY_TARGET) {
+          console.log(`Library ${libraryAtBoot}/${LIBRARY_TARGET} — building in the background…`);
+          await runDailyJob();
+        } else {
+          console.log(`Library full (${libraryAtBoot}/${LIBRARY_TARGET}) — serving stored articles, no scraping.`);
+        }
+        if (getMeta('library_audit_failclosed') !== 'done') {
+          if (libraryAtBoot === 0) {
+            // Fresh build: every article was just verified by the fail-closed
+            // pipeline seconds ago — auditing again would double the API spend.
+            setMeta('library_audit_failclosed', 'done');
+            console.log('Library built entirely under fail-closed rules — audit not needed.');
+          } else {
+            await runLibraryAudit();
+          }
+        }
+      } catch (err) {
+        console.error('Startup task failed:', err.message);
+      }
+    }, 3000);
   } else {
     console.warn('ANTHROPIC_API_KEY not set — running with demo/stored articles only.');
     console.warn('Set ANTHROPIC_API_KEY to build the verified article library.');

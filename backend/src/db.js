@@ -56,6 +56,16 @@ if (!cols.includes('featured_at')) db.exec(`ALTER TABLE articles ADD COLUMN feat
 
 db.exec(`CREATE INDEX IF NOT EXISTS idx_articles_featured ON articles(featured_at)`);
 
+// Small key/value store for one-time maintenance markers (e.g. library audits).
+db.exec(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)`);
+export function getMeta(key) {
+  const row = db.prepare(`SELECT value FROM meta WHERE key = ?`).get(key);
+  return row ? row.value : null;
+}
+export function setMeta(key, value) {
+  db.prepare(`INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(key, String(value));
+}
+
 // ─── Counts ─────────────────────────────────────────────────────────────────
 // Size of the curated library (Claude-verified articles, excluding demo seeds).
 export function countLibrary() {
@@ -96,6 +106,17 @@ export function getArticleById(id) {
     WHERE a.id = ?
     GROUP BY a.id
   `).get(id);
+}
+
+// All verified (non-demo) library articles — used by the quality audit.
+export function getLibraryArticles() {
+  return db.prepare(`SELECT * FROM articles WHERE is_demo = 0 ORDER BY id`).all();
+}
+
+// Hard-delete one article and its ratings (used when an audit rejects it).
+export function deleteArticle(id) {
+  db.prepare(`DELETE FROM ratings WHERE article_id = ?`).run(id);
+  return db.prepare(`DELETE FROM articles WHERE id = ?`).run(id).changes;
 }
 
 // Remove demo seeds once the real library can stand on its own — but never one
